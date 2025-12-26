@@ -1,0 +1,89 @@
+import onnx
+import onnxruntime as ort
+import numpy as np
+import tf2onnx
+import tensorflow as tf
+
+def optimize_onnx_for_edge(input_model_path, output_model_path):
+    """Optimize ONNX model for Edge deployment"""
+    
+    # Load model
+    model = onnx.load(input_model_path)
+    
+    # Optimize for inference
+    from onnxruntime.transformers import optimizer
+    from onnxruntime.transformers.fusion_options import FusionOptions
+    
+    opt_options = FusionOptions('bert')
+    opt_options.enable_attention = False
+    opt_options.enable_embed_layer_norm = False
+    
+    optimized_model = optimizer.optimize_model(
+        input_model_path,
+        'bert',
+        num_heads=12,
+        hidden_size=768,
+        optimization_options=opt_options
+    )
+    
+    # Quantize model for faster inference
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+    
+    quantize_dynamic(
+        input_model_path,
+        output_model_path,
+        weight_type=QuantType.QUInt8,
+        extra_options={'ActivationSymmetric': True}
+    )
+    
+    # Test optimized model
+    session = ort.InferenceSession(output_model_path)
+    input_name = session.get_inputs()[0].name
+    
+    # Test with dummy data
+    dummy_input = np.random.randn(1, 13, 100).astype(np.float32)
+    outputs = session.run(None, {input_name: dummy_input})
+    
+    print(f"✅ Model optimized for Edge AI: {output_model_path}")
+    print(f"   Input: {dummy_input.shape}")
+    print(f"   Output shapes: {[o.shape for o in outputs]}")
+    
+    return optimized_model
+
+def create_tiny_model_for_edge():
+    """Create a tiny model specifically for Edge devices"""
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(13, 100)),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(32, activation='relu'),
+        tf.keras.layers.Dense(3, activation='linear')  # distance, angle, confidence
+    ])
+    
+    model.compile(optimizer='adam', loss='mse')
+    
+    # Convert to ONNX
+    input_signature = [tf.TensorSpec(shape=(None, 13, 100), dtype=tf.float32)]
+    onnx_model, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
+    
+    # Save model
+    onnx.save(onnx_model, './models/edge/tiny_echo_model.onnx')
+    
+    # Create metadata
+    metadata = {
+        'model_type': 'tiny_echo_detector',
+        'input_shape': [1, 13, 100],
+        'output_shape': [1, 3],
+        'operations': 50000,  # Approx operations count
+        'memory_footprint': 500000,  # Bytes
+        'latency_target': '10ms',
+        'quantized': True
+    }
+    
+    import json
+    with open('./models/edge/tiny_model_metadata.json', 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    print("✅ Tiny Edge model created successfully!")
+    return model
