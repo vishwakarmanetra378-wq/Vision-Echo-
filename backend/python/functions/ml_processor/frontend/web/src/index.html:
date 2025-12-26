@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision-Echo - Acoustic Vision</title>
+    <meta name="description" content="Privacy-first acoustic navigation for visually impaired">
+    <meta name="theme-color" content="#1a237e">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" href="/assets/icon-192.png">
+    <link rel="stylesheet" href="/css/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Accessibility skip link -->
+        <a href="#main-content" class="skip-link">Skip to main content</a>
+        
+        <!-- App Header -->
+        <header class="app-header" role="banner">
+            <div class="header-content">
+                <h1 class="app-title">
+                    <span class="visually-hidden">Vision Echo</span>
+                    <span aria-hidden="true">🎯 Vision-Echo</span>
+                </h1>
+                <p class="app-subtitle">Acoustic Vision for Independent Navigation</p>
+            </div>
+            <div class="header-status">
+                <div class="status-indicator" id="connectionStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Connecting...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main id="main-content" class="main-content" role="main">
+            <!-- Calibration Section -->
+            <section class="calibration-section" aria-labelledby="calibration-title">
+                <h2 id="calibration-title" class="section-title">Room Calibration</h2>
+                <div class="calibration-controls">
+                    <button id="calibrateBtn" class="btn btn-primary" aria-describedby="calibration-desc">
+                        <span class="btn-icon">🎯</span>
+                        Calibrate Room
+                    </button>
+                    <p id="calibration-desc" class="instruction-text">
+                        Click to calibrate your environment. Please remain silent for 5 seconds.
+                    </p>
+                </div>
+                <div class="calibration-visualizer">
+                    <canvas id="calibrationCanvas" width="300" height="100" aria-label="Audio calibration visualization"></canvas>
+                </div>
+            </section>
+
+            <!-- Navigation Section -->
+            <section class="navigation-section" aria-labelledby="navigation-title">
+                <h2 id="navigation-title" class="section-title">Navigation Mode</h2>
+                <div class="navigation-controls">
+                    <button id="startNavBtn" class="btn btn-success" aria-pressed="false">
+                        <span class="btn-icon">🚶</span>
+                        Start Navigation
+                    </button>
+                    <button id="stopNavBtn" class="btn btn-danger" disabled>
+                        <span class="btn-icon">⏸️</span>
+                        Stop Navigation
+                    </button>
+                </div>
+                
+                <!-- Spatial Audio Visualization -->
+                <div class="spatial-visualizer">
+                    <div class="user-position" aria-label="Your position"></div>
+                    <div class="obstacles-container" id="obstaclesContainer"></div>
+                </div>
+            </section>
+
+            <!-- Obstacle Feedback -->
+            <section class="feedback-section" aria-labelledby="feedback-title">
+                <h2 id="feedback-title" class="section-title">Obstacle Detection</h2>
+                <div class="feedback-grid">
+                    <div class="feedback-card">
+                        <div class="feedback-icon">👈</div>
+                        <div class="feedback-info">
+                            <h3>Left Side</h3>
+                            <div class="distance-meter">
+                                <div class="meter-bar" id="leftDistance"></div>
+                                <span class="distance-text" id="leftDistanceText">Clear</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="feedback-card">
+                        <div class="feedback-icon">🎯</div>
+                        <div class="feedback-info">
+                            <h3>Front</h3>
+                            <div class="distance-meter">
+                                <div class="meter-bar" id="frontDistance"></div>
+                                <span class="distance-text" id="frontDistanceText">Clear</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="feedback-card">
+                        <div class="feedback-icon">👉</div>
+                        <div class="feedback-info">
+                            <h3>Right Side</h3>
+                            <div class="distance-meter">
+                                <div class="meter-bar" id="rightDistance"></div>
+                                <span class="distance-text" id="rightDistanceText">Clear</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Voice Commands -->
+            <section class="voice-section" aria-labelledby="voice-title">
+                <h2 id="voice-title" class="section-title">Voice Commands</h2>
+                <div class="voice-controls">
+                    <button id="voiceCommandBtn" class="btn btn-voice">
+                        <span class="btn-icon">🎤</span>
+                        Start Listening
+                    </button>
+                    <div class="command-list">
+                        <p>Try saying:</p>
+                        <ul class="command-items">
+                            <li>"Calibrate room"</li>
+                            <li>"Start navigation"</li>
+                            <li>"What's in front of me?"</li>
+                            <li>"Emergency stop"</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="voice-feedback" id="voiceFeedback" aria-live="polite"></div>
+            </section>
+        </main>
+
+        <!-- App Footer -->
+        <footer class="app-footer" role="contentinfo">
+            <div class="footer-content">
+                <p class="footer-text">
+                    <strong>Vision-Echo</strong> • Privacy-first navigation • No cameras required
+                </p>
+                <div class="footer-links">
+                    <button id="settingsBtn" class="footer-link">Settings</button>
+                    <button id="helpBtn" class="footer-link">Help</button>
+                    <button id="aboutBtn" class="footer-link">About</button>
+                </div>
+            </div>
+        </footer>
+
+        <!-- Audio Elements -->
+        <audio id="spatialAudio" hidden></audio>
+        <audio id="feedbackAudio" hidden></audio>
+    </div>
+
+    <!-- Scripts -->
+    <script type="module" src="/src/main.ts"></script>
+    <!-- Register Service Worker -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js');
+        }
+    </script>
+</body>
+</html>
