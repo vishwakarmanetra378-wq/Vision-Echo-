@@ -1,0 +1,432 @@
+import { VisionEchoAudioProcessor } from './audio/AudioProcessor';
+import { AzureService } from './services/AzureService';
+import { VoiceRecognition } from './services/VoiceRecognition';
+import { HapticFeedback } from './services/HapticFeedback';
+
+class VisionEchoApp {
+    private audioProcessor: VisionEchoAudioProcessor;
+    private azureService: AzureService;
+    private voiceRecognition: VoiceRecognition;
+    private hapticFeedback: HapticFeedback;
+    
+    private isNavigating = false;
+    private isCalibrated = false;
+    private calibrationData: any = null;
+    
+    constructor() {
+        this.initializeServices();
+        this.setupEventListeners();
+        this.setupAccessibility();
+    }
+    
+    private initializeServices(): void {
+        this.audioProcessor = new VisionEchoAudioProcessor();
+        this.azureService = new AzureService(import.meta.env.VITE_AZURE_FUNCTION_URL);
+        this.voiceRecognition = new VoiceRecognition();
+        this.hapticFeedback = new HapticFeedback();
+        
+        // Check browser compatibility
+        this.checkCompatibility();
+    }
+    
+    private async checkCompatibility(): Promise<void> {
+        const checks = {
+            'Web Audio API': !!window.AudioContext || !!(window as any).webkitAudioContext,
+            'Media Devices': !!navigator.mediaDevices?.getUserMedia,
+            'Service Workers': 'serviceWorker' in navigator,
+            'Speech Recognition': 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window
+        };
+        
+        const issues = Object.entries(checks)
+            .filter(([_, supported]) => !supported)
+            .map(([feature]) => feature);
+        
+        if (issues.length > 0) {
+            this.showAlert(`Some features may not work: ${issues.join(', ')}`);
+        }
+    }
+    
+    private setupEventListeners(): void {
+        // Calibration button
+        document.getElementById('calibrateBtn')?.addEventListener('click', () => {
+            this.calibrateEnvironment();
+        });
+        
+        // Navigation buttons
+        document.getElementById('startNavBtn')?.addEventListener('click', () => {
+            this.startNavigation();
+        });
+        
+        document.getElementById('stopNavBtn')?.addEventListener('click', () => {
+            this.stopNavigation();
+        });
+        
+        // Voice command button
+        document.getElementById('voiceCommandBtn')?.addEventListener('click', () => {
+            this.toggleVoiceRecognition();
+        });
+        
+        // Settings
+        document.getElementById('settingsBtn')?.addEventListener('click', () => {
+            this.openSettings();
+        });
+        
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            this.handleKeyboardShortcuts(e);
+        });
+    }
+    
+    private setupAccessibility(): void {
+        // ARIA live regions for screen readers
+        this.setupLiveRegions();
+        
+        // Focus management
+        this.setupFocusManagement();
+        
+        // High contrast mode detection
+        this.setupContrastMode();
+    }
+    
+    private async calibrateEnvironment(): Promise<void> {
+        try {
+            this.updateStatus('Calibrating environment...');
+            
+            // Start audio processing
+            const started = await this.audioProcessor.startEchoDetection();
+            if (!started) throw new Error('Audio access denied');
+            
+            // Collect ambient noise data
+            const calibrationSamples = await this.collectCalibrationSamples();
+            
+            // Send to Azure for processing
+            this.calibrationData = await this.azureService.calibrateEnvironment(
+                calibrationSamples
+            );
+            
+            this.isCalibrated = true;
+            this.updateStatus('Calibration complete');
+            this.showToast('Environment calibrated successfully');
+            
+        } catch (error) {
+            console.error('Calibration failed:', error);
+            this.updateStatus('Calibration failed');
+            this.showAlert('Calibration failed. Please check microphone permissions.');
+        }
+    }
+    
+    private async collectCalibrationSamples(): Promise<Float32Array[]> {
+        const samples: Float32Array[] = [];
+        
+        for (let i = 0; i < 5; i++) {
+            // Emit chirp and wait for echo
+            await this.audioProcessor.emitChirp();
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            // Collect echo data
+            const audioData = this.audioProcessor.getAudioData();
+            samples.push(audioData);
+            
+            this.updateProgress(i + 1, 5);
+        }
+        
+        return samples;
+    }
+    
+    private async startNavigation(): Promise<void> {
+        if (!this.isCalibrated) {
+            this.showAlert('Please calibrate environment first');
+            return;
+        }
+        
+        this.isNavigating = true;
+        this.updateStatus('Navigation active');
+        this.toggleNavigationButtons(true);
+        
+        // Start continuous echo processing
+        this.processContinuousEcho();
+    }
+    
+    private async processContinuousEcho(): Promise<void> {
+        while (this.isNavigating) {
+            try {
+                // Emit chirp signal
+                await this.audioProcessor.emitChirp();
+                
+                // Wait for echo
+                await new Promise(resolve => setTimeout(resolve, 50));
+                
+                // Get audio data
+                const audioData = this.audioProcessor.getAudioData();
+                
+                // Convert to base64 for transmission
+                const audioBase64 = this.float32ArrayToBase64(audioData);
+                
+                // Send to Azure for processing
+                const result = await this.azureService.processEcho({
+                    audioData: audioBase64,
+                    calibrationId: this.calibrationData.id,
+                    sessionId: this.generateSessionId()
+                });
+                
+                if (result.obstacles.length > 0) {
+                    // Update UI with obstacles
+                    this.updateObstacleDisplay(result.obstacles);
+                    
+                    // Play spatial audio
+                    this.audioProcessor.playSpatialAudio(result.spatialParams);
+                    
+                    // Provide haptic feedback
+                    this.hapticFeedback.vibratePattern(
+                        result.hapticFeedback.pattern
+                    );
+                    
+                    // Update distance meters
+                    this.updateDistanceMeters(result.obstacles);
+                }
+                
+                // Small delay to prevent overwhelming
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+            } catch (error) {
+                console.error('Echo processing error:', error);
+                this.updateStatus('Processing error - retrying...');
+            }
+        }
+    }
+    
+    private updateObstacleDisplay(obstacles: any[]): void {
+        const container = document.getElementById('obstaclesContainer');
+        if (!container) return;
+        
+        container.innerHTML = '';
+        
+        obstacles.forEach(obstacle => {
+            const obstacleEl = document.createElement('div');
+            obstacleEl.className = `obstacle obstacle-${obstacle.type}`;
+            obstacleEl.style.left = `${50 + obstacle.angle * 2}%`;
+            obstacleEl.style.top = `${50 - obstacle.distance * 10}%`;
+            obstacleEl.setAttribute('role', 'img');
+            obstacleEl.setAttribute('aria-label', `${obstacle.type} at ${obstacle.distance.toFixed(1)} meters`);
+            
+            container.appendChild(obstacleEl);
+        });
+    }
+    
+    private updateDistanceMeters(obstacles: any[]): void {
+        // Group obstacles by direction
+        const leftObstacles = obstacles.filter(o => o.angle < -30);
+        const frontObstacles = obstacles.filter(o => Math.abs(o.angle) <= 30);
+        const rightObstacles = obstacles.filter(o => o.angle > 30);
+        
+        // Update distance meters
+        this.updateMeter('leftDistance', leftObstacles);
+        this.updateMeter('frontDistance', frontObstacles);
+        this.updateMeter('rightDistance', rightObstacles);
+    }
+    
+    private updateMeter(meterId: string, obstacles: any[]): void {
+        const meterBar = document.getElementById(meterId);
+        const meterText = document.getElementById(`${meterId}Text`);
+        
+        if (!meterBar || !meterText) return;
+        
+        if (obstacles.length === 0) {
+            meterBar.style.width = '0%';
+            meterText.textContent = 'Clear';
+            return;
+        }
+        
+        const closest = Math.min(...obstacles.map(o => o.distance));
+        const width = Math.max(0, Math.min(100, (5 - closest) * 20));
+        
+        meterBar.style.width = `${width}%`;
+        meterBar.style.backgroundColor = this.getDistanceColor(closest);
+        meterText.textContent = `${closest.toFixed(1)}m`;
+    }
+    
+    private getDistanceColor(distance: number): string {
+        if (distance < 1) return '#f44336'; // Red - Very close
+        if (distance < 2) return '#ff9800'; // Orange - Close
+        if (distance < 3) return '#ffeb3b'; // Yellow - Medium
+        return '#4caf50'; // Green - Safe
+    }
+    
+    private async toggleVoiceRecognition(): Promise<void> {
+        const isListening = this.voiceRecognition.toggle();
+        const button = document.getElementById('voiceCommandBtn');
+        
+        if (button) {
+            if (isListening) {
+                button.innerHTML = '<span class="btn-icon">⏸️</span> Stop Listening';
+                button.classList.add('active');
+                this.updateStatus('Listening for commands...');
+            } else {
+                button.innerHTML = '<span class="btn-icon">🎤</span> Start Listening';
+                button.classList.remove('active');
+                this.updateStatus('Ready');
+            }
+        }
+        
+        // Handle voice commands
+        this.voiceRecognition.onResult((transcript) => {
+            this.processVoiceCommand(transcript);
+        });
+    }
+    
+    private processVoiceCommand(transcript: string): void {
+        const command = transcript.toLowerCase();
+        const feedbackEl = document.getElementById('voiceFeedback');
+        
+        if (feedbackEl) {
+            feedbackEl.textContent = `You said: "${transcript}"`;
+        }
+        
+        // Process commands
+        if (command.includes('calibrate')) {
+            this.calibrateEnvironment();
+        } else if (command.includes('start navigation') || command.includes('begin navigation')) {
+            this.startNavigation();
+        } else if (command.includes('stop navigation') || command.includes('halt')) {
+            this.stopNavigation();
+        } else if (command.includes('what\'s in front') || command.includes('what is ahead')) {
+            this.describeFrontObstacles();
+        } else if (command.includes('emergency') || command.includes('help')) {
+            this.triggerEmergencyAlert();
+        } else {
+            this.speakResponse(`I heard: ${transcript}. Try saying "calibrate room" or "start navigation"`);
+        }
+    }
+    
+    private async describeFrontObstacles(): Promise<void> {
+        if (!this.isNavigating) {
+            this.speakResponse('Navigation is not active. Say "start navigation" to begin.');
+            return;
+        }
+        
+        // Get latest obstacle data
+        const obstacles = await this.azureService.getLatestObstacles();
+        const frontObstacles = obstacles.filter(o => Math.abs(o.angle) <= 30);
+        
+        if (frontObstacles.length === 0) {
+            this.speakResponse('The path ahead is clear.');
+        } else {
+            const closest = frontObstacles.reduce((prev, curr) => 
+                prev.distance < curr.distance ? prev : curr
+            );
+            
+            this.speakResponse(
+                `There is ${closest.type} ${closest.distance.toFixed(1)} meters ahead.`
+            );
+        }
+    }
+    
+    private triggerEmergencyAlert(): void {
+        // Send emergency alert to Azure
+        this.azureService.sendEmergencyAlert();
+        
+        // Stop navigation
+        this.stopNavigation();
+        
+        // Speak alert
+        this.speakResponse('Emergency alert activated. Navigation stopped.');
+        
+        // Vibrate pattern
+        this.hapticFeedback.vibratePattern([200, 100, 200, 100, 200]);
+    }
+    
+    private speakResponse(text: string): void {
+        if ('speechSynthesis' in window) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 0.9;
+            utterance.pitch = 1;
+            window.speechSynthesis.speak(utterance);
+        }
+    }
+    
+    private stopNavigation(): void {
+        this.isNavigating = false;
+        this.updateStatus('Navigation stopped');
+        this.toggleNavigationButtons(false);
+        this.audioProcessor.stopEchoDetection();
+    }
+    
+    private toggleNavigationButtons(navigating: boolean): void {
+        const startBtn = document.getElementById('startNavBtn');
+        const stopBtn = document.getElementById('stopNavBtn');
+        
+        if (startBtn) startBtn.disabled = navigating;
+        if (stopBtn) stopBtn.disabled = !navigating;
+    }
+    
+    private updateStatus(message: string): void {
+        const statusEl = document.querySelector('.status-text');
+        if (statusEl) {
+            statusEl.textContent = message;
+        }
+    }
+    
+    private updateProgress(current: number, total: number): void {
+        const progress = (current / total) * 100;
+        // Update progress indicator if needed
+    }
+    
+    private float32ArrayToBase64(floatArray: Float32Array): string {
+        const bytes = new Uint8Array(floatArray.buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+    
+    private generateSessionId(): string {
+        return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    }
+    
+    private showAlert(message: string): void {
+        alert(message);
+    }
+    
+    private showToast(message: string): void {
+        // Implement toast notification
+        console.log('Toast:', message);
+    }
+    
+    private handleKeyboardShortcuts(event: KeyboardEvent): void {
+        // Space to toggle navigation
+        if (event.code === 'Space' && !event.target?.matches('button, input, textarea')) {
+            event.preventDefault();
+            if (this.isNavigating) {
+                this.stopNavigation();
+            } else {
+                this.startNavigation();
+            }
+        }
+        
+        // C for calibrate
+        if (event.code === 'KeyC' && event.ctrlKey) {
+            event.preventDefault();
+            this.calibrateEnvironment();
+        }
+        
+        // V for voice
+        if (event.code === 'KeyV' && event.ctrlKey) {
+            event.preventDefault();
+            this.toggleVoiceRecognition();
+        }
+    }
+    
+    private openSettings(): void {
+        // Implement settings modal
+        console.log('Opening settings...');
+    }
+}
+
+// Initialize app when DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+    const app = new VisionEchoApp();
+    
+    // Make app available globally for debugging
+    (window as any).visionEchoApp = app;
+});
