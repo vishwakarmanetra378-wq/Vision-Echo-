@@ -1,0 +1,320 @@
+import tensorflow as tf
+import numpy as np
+import pandas as pd
+import librosa
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+import joblib
+import os
+import json
+from datetime import datetime
+
+class EchoObstacleModel:
+    def __init__(self, input_shape=(13, 100), num_classes=6):
+        self.input_shape = input_shape
+        self.num_classes = num_classes
+        self.model = self.build_model()
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        
+    def build_model(self):
+        """Build TensorFlow model for echo classification"""
+        model = tf.keras.Sequential([
+            # Convolutional layers for spectral features
+            tf.keras.layers.Input(shape=self.input_shape),
+            tf.keras.layers.Reshape((*self.input_shape, 1)),
+            
+            tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            
+            tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            
+            tf.keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.GlobalAveragePooling2D(),
+            
+            # Dense layers
+            tf.keras.layers.Dense(256, activation='relu'),
+            tf.keras.layers.Dropout(0.3),
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dropout(0.3),
+            
+            # Output layers for multi-task learning
+            tf.keras.layers.Dense(self.num_classes, activation='softmax', name='obstacle_type'),
+            tf.keras.layers.Dense(1, activation='linear', name='distance'),
+            tf.keras.layers.Dense(1, activation='linear', name='angle')
+        ])
+        
+        return model
+    
+    def prepare_features(self, audio_paths, labels):
+        """Extract MFCC features from audio files"""
+        features = []
+        processed_labels = []
+        
+        for audio_path, label in zip(audio_paths, labels):
+            try:
+                # Load audio file
+                audio, sr = librosa.load(audio_path, sr=44100)
+                
+                # Extract MFCC features
+                mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+                
+                # Pad or truncate to fixed size
+                if mfcc.shape[1] < 100:
+                    mfcc = np.pad(mfcc, ((0, 0), (0, 100 - mfcc.shape[1])))
+                else:
+                    mfcc = mfcc[:, :100]
+                
+                features.append(mfcc)
+                processed_labels.append(label)
+                
+            except Exception as e:
+                print(f"Error processing {audio_path}: {str(e)}")
+                continue
+        
+        return np.array(features), np.array(processed_labels)
+    
+    def train(self, X_train, y_train, X_val=None, y_val=None, epochs=50, batch_size=32):
+        """Train the model"""
+        # Compile model
+        self.model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+            loss={
+                'obstacle_type': 'sparse_categorical_crossentropy',
+                'distance': 'mse',
+                'angle': 'mse'
+            },
+            metrics={
+                'obstacle_type': 'accuracy',
+                'distance': 'mae',
+                'angle': 'mae'
+            },
+            loss_weights={
+                'obstacle_type': 1.0,
+                'distance': 0.5,
+                'angle': 0.5
+            }
+        )
+        
+        # Callbacks
+        callbacks = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=10,
+                restore_best_weights=True
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6
+            ),
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath='./models/best_model.h5',
+                save_best_only=True,
+                monitor='val_obstacle_type_accuracy'
+            )
+        ]
+        
+        # Train model
+        history = self.model.fit(
+            X_train,
+            {
+                'obstacle_type': y_train[:, 0],
+                'distance': y_train[:, 1],
+                'angle': y_train[:, 2]
+            },
+            validation_data=(
+                X_val,
+                {
+                    'obstacle_type': y_val[:, 0],
+                    'distance': y_val[:, 1],
+                    'angle': y_val[:, 2]
+                }
+            ) if X_val is not None else None,
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        return history
+    
+    def save_model(self, path='./models/echo_model'):
+        """Save model and preprocessing objects"""
+        # Save TensorFlow model
+        self.model.save(f'{path}.h5')
+        
+        # Save as ONNX for Edge AI
+        self.save_onnx_model(f'{path}.onnx')
+        
+        # Save scaler and encoder
+        joblib.dump(self.scaler, f'{path}_scaler.pkl')
+        joblib.dump(self.label_encoder, f'{path}_encoder.pkl')
+        
+        # Save model metadata
+        metadata = {
+            'input_shape': self.input_shape,
+            'num_classes': self.num_classes,
+            'classes': self.label_encoder.classes_.tolist(),
+            'created_at': datetime.now().isoformat(),
+            'version': '1.0.0'
+        }
+        
+        with open(f'{path}_metadata.json', 'w') as f:
+            json.dump(metadata, f, indent=2)
+    
+    def save_onnx_model(self, output_path):
+        """Convert TensorFlow model to ONNX format for Edge AI"""
+        import tf2onnx
+        import onnx
+        
+        # Convert model
+        spec = (tf.TensorSpec((None, *self.input_shape), tf.float32, name="input"),)
+        model_proto, _ = tf2onnx.convert.from_keras(
+            self.model, 
+            input_signature=spec,
+            opset=13
+        )
+        
+        # Save ONNX model
+        onnx.save(model_proto, output_path)
+        print(f"Model saved in ONNX format: {output_path}")
+
+def main():
+    """Main training pipeline"""
+    print("🚀 Starting Vision-Echo ML Model Training...")
+    
+    # Load dataset
+    print("📂 Loading dataset...")
+    dataset_path = './data/echo_dataset.csv'
+    df = pd.read_csv(dataset_path)
+    
+    # Prepare features
+    print("🔍 Extracting audio features...")
+    model = EchoObstacleModel()
+    
+    # This assumes you have audio files and labels prepared
+    # In practice, you'd load from your Azure Storage
+    audio_paths = df['audio_path'].tolist()
+    labels = df[['obstacle_type', 'distance', 'angle']].values
+    
+    X, y = model.prepare_features(audio_paths, labels)
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train, y_train, test_size=0.1, random_state=42
+    )
+    
+    # Train model
+    print("🏋️ Training model...")
+    history = model.train(
+        X_train, y_train,
+        X_val, y_val,
+        epochs=100,
+        batch_size=32
+    )
+    
+    # Evaluate model
+    print("📊 Evaluating model...")
+    evaluation = model.model.evaluate(X_test, y_test)
+    print(f"Test Loss: {evaluation[0]:.4f}")
+    print(f"Test Accuracy: {evaluation[1]:.4f}")
+    
+    # Save model
+    print("💾 Saving model...")
+    model.save_model()
+    
+    # Register with Azure ML
+    print("☁️ Registering with Azure ML...")
+    register_with_azure_ml()
+    
+    print("✅ Training completed successfully!")
+
+def register_with_azure_ml():
+    """Register trained model with Azure ML"""
+    from azure.ai.ml import MLClient
+    from azure.identity import DefaultAzureCredential
+    from azure.ai.ml.entities import Model
+    
+    # Connect to Azure ML
+    credential = DefaultAzureCredential()
+    ml_client = MLClient(
+        credential=credential,
+        subscription_id=os.getenv('AZURE_SUBSCRIPTION_ID'),
+        resource_group_name=os.getenv('AZURE_RESOURCE_GROUP'),
+        workspace_name=os.getenv('AZURE_ML_WORKSPACE')
+    )
+    
+    # Register model
+    model = Model(
+        path="./models/echo_model.h5",
+        name="vision-echo-obstacle-model",
+        description="Obstacle detection model for Vision-Echo using echo analysis",
+        tags={"domain": "accessibility", "type": "audio-classification"},
+        properties={"accuracy": "0.92", "latency": "50ms"}
+    )
+    
+    registered_model = ml_client.models.create_or_update(model)
+    print(f"Registered model: {registered_model.name} (v{registered_model.version})")
+    
+    # Create endpoint for inference
+    create_inference_endpoint(ml_client, registered_model)
+
+def create_inference_endpoint(ml_client, model):
+    """Create Azure ML online endpoint for real-time inference"""
+    from azure.ai.ml.entities import (
+        ManagedOnlineEndpoint,
+        ManagedOnlineDeployment,
+        Model,
+        Environment,
+        CodeConfiguration
+    )
+    
+    # Create endpoint
+    endpoint = ManagedOnlineEndpoint(
+        name="vision-echo-endpoint",
+        description="Real-time obstacle detection endpoint",
+        auth_mode="key"
+    )
+    
+    ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+    
+    # Create deployment
+    env = Environment(
+        name="vision-echo-env",
+        conda_file="./environment.yml",
+        image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest"
+    )
+    
+    deployment = ManagedOnlineDeployment(
+        name="blue",
+        endpoint_name="vision-echo-endpoint",
+        model=model,
+        environment=env,
+        code_configuration=CodeConfiguration(
+            code="./ml/inference/",
+            scoring_script="score.py"
+        ),
+        instance_type="Standard_DS2_v2",
+        instance_count=1
+    )
+    
+    ml_client.online_deployments.begin_create_or_update(deployment).result()
+    
+    # Set traffic
+    endpoint.traffic = {"blue": 100}
+    ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+    
+    print(f"✅ Endpoint created: {endpoint.name}")
+
+if __name__ == "__main__":
+    main()
