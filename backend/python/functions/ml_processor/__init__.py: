@@ -1,0 +1,175 @@
+import azure.functions as func
+import logging
+import json
+import numpy as np
+import librosa
+import io
+import base64
+from typing import Dict, List, Any
+from datetime import datetime
+import onnxruntime as ort
+from scipy import signal
+import os
+
+app = func.FunctionApp()
+
+class EchoMLProcessor:
+    def __init__(self):
+        # Initialize ONNX runtime for Edge AI
+        self.edge_session = ort.InferenceSession(
+            './models/echo_model.onnx',
+            providers=['CPUExecutionProvider']
+        )
+        
+        # Load ML model from Azure ML
+        self.ml_endpoint = os.getenv('AZURE_ML_ENDPOINT')
+        self.ml_key = os.getenv('AZURE_ML_KEY')
+    
+    def extract_features(self, audio_data: np.ndarray, sr: int = 44100) -> Dict:
+        """Extract audio features for ML processing"""
+        features = {}
+        
+        # MFCC features
+        mfcc = librosa.feature.mfcc(y=audio_data, sr=sr, n_mfcc=13)
+        features['mfcc_mean'] = np.mean(mfcc, axis=1).tolist()
+        features['mfcc_std'] = np.std(mfcc, axis=1).tolist()
+        
+        # Spectral features
+        spectral_centroid = librosa.feature.spectral_centroid(y=audio_data, sr=sr)
+        features['spectral_centroid'] = np.mean(spectral_centroid).item()
+        
+        # Zero-crossing rate
+        zcr = librosa.feature.zero_crossing_rate(audio_data)
+        features['zero_crossing_rate'] = np.mean(zcr).item()
+        
+        # RMS energy
+        rms = librosa.feature.rms(y=audio_data)
+        features['rms_energy'] = np.mean(rms).item()
+        
+        # Spectral rolloff
+        rolloff = librosa.feature.spectral_rolloff(y=audio_data, sr=sr)
+        features['spectral_rolloff'] = np.mean(rolloff).item()
+        
+        # Chroma features
+        chroma = librosa.feature.chroma_stft(y=audio_data, sr=sr)
+        features['chroma'] = np.mean(chroma, axis=1).tolist()
+        
+        return features
+    
+    def detect_obstacles(self, features: Dict) -> List[Dict]:
+        """Detect obstacles using ML model"""
+        # Prepare input for ONNX model
+        input_data = self.prepare_model_input(features)
+        
+        # Run Edge AI inference
+        input_name = self.edge_session.get_inputs()[0].name
+        output_name = self.edge_session.get_outputs()[0].name
+        
+        result = self.edge_session.run(
+            [output_name],
+            {input_name: input_data}
+        )
+        
+        # Parse results
+        obstacles = self.parse_ml_results(result[0])
+        return obstacles
+    
+    def prepare_model_input(self, features: Dict) -> np.ndarray:
+        """Prepare features for model input"""
+        # Combine all features into single array
+        feature_vector = []
+        
+        # Add MFCC features
+        feature_vector.extend(features['mfcc_mean'])
+        feature_vector.extend(features['mfcc_std'])
+        
+        # Add other features
+        feature_vector.append(features['spectral_centroid'])
+        feature_vector.append(features['zero_crossing_rate'])
+        feature_vector.append(features['rms_energy'])
+        feature_vector.append(features['spectral_rolloff'])
+        feature_vector.extend(features['chroma'])
+        
+        return np.array([feature_vector], dtype=np.float32)
+    
+    def parse_ml_results(self, ml_output: np.ndarray) -> List[Dict]:
+        """Parse ML model output into obstacle objects"""
+        obstacles = []
+        
+        # Assuming model outputs: [distance, angle, confidence, type]
+        for i in range(0, len(ml_output), 4):
+            obstacle = {
+                'id': f'obstacle_{i//4}',
+                'distance': float(ml_output[i]),  # meters
+                'angle': float(ml_output[i+1]),   # degrees
+                'confidence': float(ml_output[i+2]),
+                'type': self.classify_type(ml_output[i+3]),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            if obstacle['confidence'] > 0.6:  # Confidence threshold
+                obstacles.append(obstacle)
+        
+        return obstacles
+    
+    def classify_type(self, type_code: float) -> str:
+        """Classify obstacle type"""
+        types = ['wall', 'furniture', 'person', 'door', 'stairs', 'unknown']
+        idx = int(type_code * len(types))
+        return types[min(idx, len(types)-1)]
+
+@app.route(route="ml-inference", methods=["POST"], auth_level="function")
+@app.cosmos_db_input(
+    arg_name="trainingDocuments",
+    database_name="VisionEchoDB",
+    collection_name="TrainingData",
+    connection_string_setting="CosmosDBConnection")
+def ml_inference(
+    req: func.HttpRequest,
+    trainingDocuments: func.DocumentList
+) -> func.HttpResponse:
+    """Azure Function for ML inference"""
+    try:
+        processor = EchoMLProcessor()
+        
+        # Get audio data from request
+        req_body = req.get_json()
+        audio_base64 = req_body.get('audioData')
+        
+        # Decode audio
+        audio_bytes = base64.b64decode(audio_base64)
+        audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
+        
+        # Extract features
+        features = processor.extract_features(audio_array)
+        
+        # Run ML inference
+        obstacles = processor.detect_obstacles(features)
+        
+        # Store in Cosmos DB for training
+        training_doc = {
+            "id": str(datetime.utcnow().timestamp()),
+            "features": features,
+            "obstacles": obstacles,
+            "timestamp": datetime.utcnow().isoformat(),
+            "processed": True
+        }
+        
+        return func.HttpResponse(
+            json.dumps({
+                "success": True,
+                "obstacles": obstacles,
+                "feature_count": len(features),
+                "inference_time": datetime.utcnow().isoformat()
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
+        
+    except Exception as e:
+        logging.error(f"ML inference failed: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
