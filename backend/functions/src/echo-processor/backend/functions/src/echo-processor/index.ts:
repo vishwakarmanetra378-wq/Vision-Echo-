@@ -1,0 +1,146 @@
+import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
+import * as tf from '@tensorflow/tfjs-node';
+import * as audio from '../lib/audio-processor';
+import * as storage from '../lib/azure-storage';
+import { validateEchoData } from '../lib/validators';
+import { logger } from '../lib/logger';
+
+interface EchoRequest {
+    audioData: string;  // Base64 encoded
+    calibrationId: string;
+    deviceId: string;
+    sessionId: string;
+    timestamp: string;
+    metadata?: {
+        environment: 'indoor' | 'outdoor';
+        noiseLevel: number;
+        roomSize?: string;
+    };
+}
+
+export async function processEcho(
+    request: HttpRequest,
+    context: InvocationContext
+): Promise<HttpResponseInit> {
+    try {
+        const echoRequest: EchoRequest = await request.json();
+        
+        // Validate input
+        const validation = validateEchoData(echoRequest);
+        if (!validation.valid) {
+            return { 
+                status: 400, 
+                jsonBody: { error: validation.error } 
+            };
+        }
+
+        logger.info(`Processing echo for session: ${echoRequest.sessionId}`);
+
+        // Decode audio
+        const audioBuffer = Buffer.from(echoRequest.audioData, 'base64');
+        
+        // Process audio features
+        const features = await audio.extractAudioFeatures(audioBuffer);
+        
+        // Run ML inference (Edge or Cloud based on latency)
+        const inferenceResult = await runMLInference(features);
+        
+        // Generate spatial audio parameters
+        const spatialParams = generateSpatialAudio(inferenceResult);
+        
+        // Store for ML training
+        await storeTrainingData({
+            features,
+            inferenceResult,
+            spatialParams,
+            metadata: echoRequest.metadata,
+            timestamp: new Date().toISOString()
+        });
+
+        logger.info(`Successfully processed echo for ${echoRequest.sessionId}`);
+
+        return {
+            jsonBody: {
+                success: true,
+                obstacles: inferenceResult.obstacles,
+                spatialParams,
+                hapticFeedback: generateHapticFeedback(inferenceResult),
+                audioCues: generateAudioCues(spatialParams),
+                timestamp: new Date().toISOString()
+            }
+        };
+
+    } catch (error) {
+        logger.error('Echo processing failed:', error);
+        return {
+            status: 500,
+            jsonBody: { 
+                error: 'Processing failed',
+                details: error.message 
+            }
+        };
+    }
+}
+
+async function runMLInference(features: any) {
+    // Try Edge AI first, fallback to Cloud
+    try {
+        // Load ONNX model for Edge inference
+        const session = await tf.node.loadSavedModel('./models/edge/echo-model');
+        const inputTensor = tf.tensor([features.mfcc, features.spectralCentroid]);
+        const results = session.predict(inputTensor);
+        
+        return {
+            obstacles: parseObstacleResults(results),
+            confidence: results.confidence,
+            inferenceType: 'edge'
+        };
+    } catch (edgeError) {
+        logger.warn('Edge inference failed, falling back to cloud');
+        
+        // Fallback to Azure ML endpoint
+        const cloudResults = await callAzureML(features);
+        return {
+            ...cloudResults,
+            inferenceType: 'cloud'
+        };
+    }
+}
+
+function generateSpatialAudio(inferenceResult: any) {
+    const params = {
+        panPositions: [] as number[],
+        pitches: [] as number[],
+        volumes: [] as number[],
+        delays: [] as number[],
+        reverb: [] as number[]
+    };
+
+    inferenceResult.obstacles.forEach((obstacle: any) => {
+        // Convert polar coordinates to stereo pan (-1 to 1)
+        const pan = Math.sin(obstacle.angle * Math.PI / 180);
+        
+        // Distance-based pitch (closer = higher pitch)
+        const pitch = 300 + (2000 / (obstacle.distance + 0.1));
+        
+        // Intensity-based volume
+        const volume = Math.min(0.8, obstacle.intensity / 100);
+        
+        // Distance-based delay for depth perception
+        const delay = obstacle.distance * 0.003; // 3ms per meter
+        
+        params.panPositions.push(pan);
+        params.pitches.push(pitch);
+        params.volumes.push(volume);
+        params.delays.push(delay);
+        params.reverb.push(Math.min(0.6, obstacle.distance / 10));
+    });
+
+    return params;
+}
+
+app.http('processEcho', {
+    methods: ['POST'],
+    authLevel: 'function',
+    handler: processEcho
+});
