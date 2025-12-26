@@ -1,0 +1,187 @@
+// Advanced Audio Processing with Web Audio API
+export class VisionEchoAudioProcessor {
+    private audioContext: AudioContext;
+    private analyser: AnalyserNode;
+    private gainNode: GainNode;
+    private pannerNode: StereoPannerNode;
+    private sourceNode: MediaStreamAudioSourceNode | null = null;
+    private isProcessing = false;
+    private chirpBuffer: AudioBuffer | null = null;
+    
+    // Audio parameters
+    private readonly SAMPLE_RATE = 44100;
+    private readonly CHIRP_FREQ_START = 17000;
+    private readonly CHIRP_FREQ_END = 19000;
+    private readonly CHIRP_DURATION = 0.01; // 10ms
+    
+    constructor() {
+        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        this.analyser = this.audioContext.createAnalyser();
+        this.gainNode = this.audioContext.createGain();
+        this.pannerNode = this.audioContext.createStereoPanner();
+        
+        this.setupAudioGraph();
+        this.generateChirpSignal();
+    }
+    
+    private setupAudioGraph(): void {
+        // Connect audio processing chain
+        this.analyser.fftSize = 2048;
+        this.analyser.smoothingTimeConstant = 0.8;
+        
+        // Connect nodes
+        this.analyser.connect(this.gainNode);
+        this.gainNode.connect(this.pannerNode);
+        this.pannerNode.connect(this.audioContext.destination);
+    }
+    
+    private async generateChirpSignal(): Promise<void> {
+        const buffer = this.audioContext.createBuffer(
+            1,
+            this.SAMPLE_RATE * this.CHIRP_DURATION,
+            this.SAMPLE_RATE
+        );
+        
+        const channelData = buffer.getChannelData(0);
+        const sampleCount = channelData.length;
+        
+        // Generate linear chirp
+        for (let i = 0; i < sampleCount; i++) {
+            const t = i / this.SAMPLE_RATE;
+            const freq = this.CHIRP_FREQ_START + 
+                        ((this.CHIRP_FREQ_END - this.CHIRP_FREQ_START) * t / this.CHIRP_DURATION);
+            channelData[i] = Math.sin(2 * Math.PI * freq * t) * 0.5;
+        }
+        
+        this.chirpBuffer = buffer;
+    }
+    
+    async startEchoDetection(): Promise<boolean> {
+        try {
+            // Request microphone access
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    sampleRate: this.SAMPLE_RATE,
+                    channelCount: 1
+                }
+            });
+            
+            this.sourceNode = this.audioContext.createMediaStreamSource(stream);
+            this.sourceNode.connect(this.analyser);
+            
+            this.isProcessing = true;
+            return true;
+            
+        } catch (error) {
+            console.error('Failed to start audio processing:', error);
+            return false;
+        }
+    }
+    
+    stopEchoDetection(): void {
+        if (this.sourceNode) {
+            this.sourceNode.disconnect();
+            this.sourceNode = null;
+        }
+        this.isProcessing = false;
+    }
+    
+    async emitChirp(): Promise<void> {
+        if (!this.chirpBuffer) return;
+        
+        const source = this.audioContext.createBufferSource();
+        source.buffer = this.chirpBuffer;
+        source.connect(this.audioContext.destination);
+        source.start();
+        
+        // Wait for chirp to complete
+        await new Promise(resolve => 
+            setTimeout(resolve, this.CHIRP_DURATION * 1000)
+        );
+    }
+    
+    getAudioData(): Float32Array {
+        const dataArray = new Float32Array(this.analyser.fftSize);
+        this.analyser.getFloatTimeDomainData(dataArray);
+        return dataArray;
+    }
+    
+    getFrequencyData(): Uint8Array {
+        const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+        this.analyser.getByteFrequencyData(dataArray);
+        return dataArray;
+    }
+    
+    playSpatialAudio(params: SpatialAudioParams): void {
+        const {
+            panPositions,
+            pitches,
+            volumes,
+            delays,
+            reverb
+        } = params;
+        
+        // Create spatial audio cues for each obstacle
+        panPositions.forEach((pan, index) => {
+            this.playSpatialCue({
+                pan,
+                frequency: pitches[index],
+                volume: volumes[index],
+                delay: delays[index],
+                reverb: reverb[index]
+            });
+        });
+    }
+    
+    private playSpatialCue(cue: SpatialCue): void {
+        const oscillator = this.audioContext.createOscillator();
+        const gainNode = this.audioContext.createGain();
+        const panner = this.audioContext.createStereoPanner();
+        const delayNode = this.audioContext.createDelay();
+        const convolver = this.audioContext.createConvolver();
+        
+        // Set parameters
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(cue.frequency, this.audioContext.currentTime);
+        
+        panner.pan.setValueAtTime(cue.pan, this.audioContext.currentTime);
+        gainNode.gain.setValueAtTime(cue.volume, this.audioContext.currentTime);
+        delayNode.delayTime.setValueAtTime(cue.delay, this.audioContext.currentTime);
+        
+        // Create envelope
+        gainNode.gain.exponentialRampToValueAtTime(
+            0.001,
+            this.audioContext.currentTime + 0.3
+        );
+        
+        // Connect nodes
+        oscillator.connect(gainNode);
+        gainNode.connect(delayNode);
+        delayNode.connect(panner);
+        panner.connect(this.audioContext.destination);
+        
+        // Play sound
+        oscillator.start();
+        oscillator.stop(this.audioContext.currentTime + 0.3);
+    }
+}
+
+// TypeScript Interfaces
+interface SpatialAudioParams {
+    panPositions: number[];
+    pitches: number[];
+    volumes: number[];
+    delays: number[];
+    reverb: number[];
+}
+
+interface SpatialCue {
+    pan: number;
+    frequency: number;
+    volume: number;
+    delay: number;
+    reverb: number;
+}
