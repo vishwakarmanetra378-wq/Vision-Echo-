@@ -1,0 +1,587 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  SafeAreaView,
+  Platform,
+  Vibration,
+  Alert,
+  AccessibilityInfo,
+  Dimensions,
+} from 'react-native';
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
+import { Accelerometer } from 'expo-sensors';
+import { BleManager } from 'react-native-ble-plx';
+import axios from 'axios';
+
+// Azure Services
+import { AzureEchoService } from './services/AzureEchoService';
+import { AudioProcessor } from './services/AudioProcessor';
+import { VoiceRecognition } from './services/VoiceRecognition';
+
+const { width, height } = Dimensions.get('window');
+
+export default function VisionEchoApp() {
+  // State
+  const [isCalibrated, setIsCalibrated] = useState(false);
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [obstacles, setObstacles] = useState([]);
+  const [status, setStatus] = useState('Ready to calibrate');
+  const [connectionStrength, setConnectionStrength] = useState(100);
+  
+  // Refs
+  const audioProcessor = useRef(new AudioProcessor());
+  const azureService = useRef(new AzureEchoService());
+  const voiceRecognition = useRef(new VoiceRecognition());
+  const navigationInterval = useRef<NodeJS.Timeout | null>(null);
+  
+  // Audio recording permission
+  useEffect(() => {
+    requestPermissions();
+    setupAudio();
+    setupAccessibility();
+    
+    return () => {
+      cleanup();
+    };
+  }, []);
+  
+  const requestPermissions = async () => {
+    try {
+      const { status } = await Audio.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission Required',
+          'Vision-Echo needs microphone access to function properly.'
+        );
+      }
+    } catch (error) {
+      console.error('Permission error:', error);
+    }
+  };
+  
+  const setupAudio = async () => {
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: true,
+    });
+    
+    await audioProcessor.current.initialize();
+  };
+  
+  const setupAccessibility = () => {
+    if (Platform.OS === 'ios') {
+      AccessibilityInfo.announceForAccessibility('Vision Echo app loaded');
+    }
+  };
+  
+  const calibrateEnvironment = async () => {
+    try {
+      setStatus('Calibrating environment...');
+      
+      // Start calibration
+      const calibrationData = await audioProcessor.current.startCalibration();
+      
+      // Send to Azure
+      const result = await azureService.current.calibrate(calibrationData);
+      
+      if (result.success) {
+        setIsCalibrated(true);
+        setStatus('Calibration complete!');
+        
+        // Announce for accessibility
+        if (Platform.OS === 'ios') {
+          AccessibilityInfo.announceForAccessibility('Calibration complete');
+        }
+        
+        // Vibrate confirmation
+        Vibration.vibrate([100, 50, 100]);
+      }
+    } catch (error) {
+      setStatus('Calibration failed');
+      Alert.alert('Calibration Error', error.message);
+    }
+  };
+  
+  const startNavigation = async () => {
+    if (!isCalibrated) {
+      Alert.alert('Calibration Required', 'Please calibrate first');
+      return;
+    }
+    
+    setIsNavigating(true);
+    setStatus('Navigation active');
+    
+    // Start continuous echo processing
+    navigationInterval.current = setInterval(async () => {
+      await processEchoCycle();
+    }, 200); // Process every 200ms
+    
+    // Announce start
+    if (Platform.OS === 'ios') {
+      AccessibilityInfo.announceForAccessibility('Navigation started');
+    }
+  };
+  
+  const processEchoCycle = async () => {
+    try {
+      // Emit chirp
+      await audioProcessor.current.emitChirp();
+      
+      // Record echo
+      const echoData = await audioProcessor.current.recordEcho(500); // 500ms
+      
+      // Process with Azure
+      const result = await azureService.current.processEcho(echoData);
+      
+      if (result.obstacles.length > 0) {
+        setObstacles(result.obstacles);
+        
+        // Provide feedback
+        provideSpatialFeedback(result.obstacles);
+        provideHapticFeedback(result.obstacles);
+        
+        // Update status with closest obstacle
+        const closest = result.obstacles.reduce((prev, curr) => 
+          prev.distance < curr.distance ? prev : curr
+        );
+        
+        setStatus(`${closest.type} ${closest.distance.toFixed(1)}m ahead`);
+      }
+    } catch (error) {
+      console.error('Echo cycle error:', error);
+    }
+  };
+  
+  const provideSpatialFeedback = (obstacles) => {
+    // Group obstacles by direction
+    const left = obstacles.filter(o => o.angle < -30);
+    const center = obstacles.filter(o => Math.abs(o.angle) <= 30);
+    const right = obstacles.filter(o => o.angle > 30);
+    
+    // Play spatial sounds
+    audioProcessor.current.playSpatialSounds({
+      left: left.length > 0 ? left[0].distance : null,
+      center: center.length > 0 ? center[0].distance : null,
+      right: right.length > 0 ? right[0].distance : null,
+    });
+  };
+  
+  const provideHapticFeedback = (obstacles) => {
+    const closest = obstacles.reduce((prev, curr) => 
+      prev.distance < curr.distance ? prev : curr
+    );
+    
+    if (closest.distance < 1) {
+      // Very close - urgent vibration
+      Vibration.vibrate([100, 50, 100, 50, 100], true);
+    } else if (closest.distance < 2) {
+      // Close - strong vibration
+      Vibration.vibrate([200, 100], false);
+    } else if (closest.distance < 3) {
+      // Medium - single vibration
+      Vibration.vibrate(100);
+    }
+  };
+  
+  const stopNavigation = () => {
+    if (navigationInterval.current) {
+      clearInterval(navigationInterval.current);
+      navigationInterval.current = null;
+    }
+    
+    setIsNavigating(false);
+    setStatus('Navigation stopped');
+    setObstacles([]);
+    
+    // Stop audio
+    audioProcessor.current.stop();
+    
+    // Announce stop
+    if (Platform.OS === 'ios') {
+      AccessibilityInfo.announceForAccessibility('Navigation stopped');
+    }
+  };
+  
+  const handleVoiceCommand = async () => {
+    const command = await voiceRecognition.current.startListening();
+    
+    switch (command.toLowerCase()) {
+      case 'calibrate room':
+        calibrateEnvironment();
+        break;
+      case 'start navigation':
+        startNavigation();
+        break;
+      case 'stop navigation':
+        stopNavigation();
+        break;
+      case 'what is in front':
+        describeFrontObstacles();
+        break;
+      case 'emergency stop':
+        emergencyStop();
+        break;
+      default:
+        speakResponse(`Command not recognized: ${command}`);
+    }
+  };
+  
+  const describeFrontObstacles = () => {
+    const frontObstacles = obstacles.filter(o => Math.abs(o.angle) <= 30);
+    
+    if (frontObstacles.length === 0) {
+      speakResponse('Path is clear');
+    } else {
+      const closest = frontObstacles[0];
+      speakResponse(`${closest.type} ${closest.distance.toFixed(1)} meters ahead`);
+    }
+  };
+  
+  const emergencyStop = () => {
+    stopNavigation();
+    Vibration.vibrate([500, 200, 500, 200, 500]);
+    setStatus('EMERGENCY STOP');
+    
+    // Send emergency alert to Azure
+    azureService.current.sendEmergencyAlert();
+  };
+  
+  const speakResponse = (text: string) => {
+    // Implement text-to-speech
+    console.log('Speaking:', text);
+  };
+  
+  const cleanup = () => {
+    if (navigationInterval.current) {
+      clearInterval(navigationInterval.current);
+    }
+    audioProcessor.current.cleanup();
+  };
+  
+  return (
+    <SafeAreaView style={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.title}>Vision-Echo</Text>
+        <Text style={styles.subtitle}>Acoustic Navigation</Text>
+        
+        <View style={styles.statusContainer}>
+          <View style={[
+            styles.statusIndicator,
+            { backgroundColor: isNavigating ? '#4CAF50' : '#FF9800' }
+          ]} />
+          <Text style={styles.statusText}>{status}</Text>
+        </View>
+        
+        <View style={styles.connectionIndicator}>
+          <Text style={styles.connectionText}>
+            Connection: {connectionStrength}%
+          </Text>
+        </View>
+      </View>
+      
+      {/* Main Content */}
+      <View style={styles.mainContent}>
+        {/* Calibration Section */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Calibration</Text>
+          <TouchableOpacity
+            style={[
+              styles.button,
+              styles.calibrateButton,
+              isCalibrated && styles.calibratedButton
+            ]}
+            onPress={calibrateEnvironment}
+            disabled={isNavigating}
+            accessibilityLabel={
+              isCalibrated ? 'Recalibrate environment' : 'Calibrate environment'
+            }
+            accessibilityHint="Tap to calibrate microphone for your surroundings"
+          >
+            <Text style={styles.buttonText}>
+              {isCalibrated ? '✓ Recalibrate' : 'Calibrate Room'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        
+        {/* Navigation Controls */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Navigation</Text>
+          <View style={styles.buttonRow}>
+            <TouchableOpacity
+              style={[
+                styles.button,
+                styles.navigateButton,
+                isNavigating && styles.activeButton
+              ]}
+              onPress={startNavigation}
+              disabled={!isCalibrated || isNavigating}
+            >
+              <Text style={styles.buttonText}>
+                {isNavigating ? 'Navigating...' : 'Start Navigation'}
+              </Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={[styles.button, styles.stopButton]}
+              onPress={stopNavigation}
+              disabled={!isNavigating}
+            >
+              <Text style={styles.buttonText}>Stop</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+        
+        {/* Obstacle Visualization */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Obstacles Detected</Text>
+          <View style={styles.obstacleVisualizer}>
+            {/* User position */}
+            <View style={styles.userPosition} />
+            
+            {/* Obstacle dots */}
+            {obstacles.map((obstacle, index) => (
+              <View
+                key={index}
+                style={[
+                  styles.obstacleDot,
+                  {
+                    left: 50 + obstacle.angle * 0.5,
+                    top: 50 - obstacle.distance * 10,
+                    backgroundColor: getObstacleColor(obstacle.distance),
+                  }
+                ]}
+                accessibilityLabel={`${obstacle.type} at ${obstacle.distance.toFixed(1)} meters`}
+              />
+            ))}
+          </View>
+          
+          <Text style={styles.obstacleCount}>
+            {obstacles.length} obstacles detected
+          </Text>
+        </View>
+        
+        {/* Voice Commands */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Voice Control</Text>
+          <TouchableOpacity
+            style={[styles.button, styles.voiceButton]}
+            onPress={handleVoiceCommand}
+          >
+            <Text style={styles.buttonText}>🎤 Voice Command</Text>
+          </TouchableOpacity>
+          
+          <View style={styles.commandList}>
+            <Text style={styles.commandHint}>Try saying:</Text>
+            <Text style={styles.commandItem}>• "Calibrate room"</Text>
+            <Text style={styles.commandItem}>• "Start navigation"</Text>
+            <Text style={styles.commandItem}>• "What is in front"</Text>
+            <Text style={styles.commandItem}>• "Emergency stop"</Text>
+          </View>
+        </View>
+      </View>
+      
+      {/* Footer */}
+      <View style={styles.footer}>
+        <Text style={styles.footerText}>
+          Privacy-first • No camera • Azure AI Powered
+        </Text>
+        <View style={styles.footerLinks}>
+          <TouchableOpacity>
+            <Text style={styles.footerLink}>Settings</Text>
+          </TouchableOpacity>
+          <TouchableOpacity>
+            <Text style={styles.footerLink}>Help</Text>
+          </TouchableOpacity>
+          <TouchableOpacity>
+            <Text style={styles.footerLink}>About</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const getObstacleColor = (distance: number) => {
+  if (distance < 1) return '#F44336'; // Red
+  if (distance < 2) return '#FF9800'; // Orange
+  if (distance < 3) return '#FFEB3B'; // Yellow
+  return '#4CAF50'; // Green
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#121212',
+  },
+  header: {
+    backgroundColor: '#1A237E',
+    padding: 20,
+    borderBottomLeftRadius: 20,
+    borderBottomRightRadius: 20,
+  },
+  title: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: 'white',
+    textAlign: 'center',
+  },
+  subtitle: {
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.8)',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  statusText: {
+    fontSize: 16,
+    color: 'white',
+    fontWeight: '500',
+  },
+  connectionIndicator: {
+    alignItems: 'center',
+  },
+  connectionText: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+  },
+  mainContent: {
+    flex: 1,
+    padding: 20,
+  },
+  section: {
+    marginBottom: 24,
+    backgroundColor: '#1E1E1E',
+    borderRadius: 12,
+    padding: 16,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: 'white',
+    marginBottom: 12,
+  },
+  button: {
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  calibrateButton: {
+    backgroundColor: '#2196F3',
+  },
+  calibratedButton: {
+    backgroundColor: '#4CAF50',
+  },
+  navigateButton: {
+    backgroundColor: '#673AB7',
+    flex: 1,
+    marginRight: 8,
+  },
+  activeButton: {
+    backgroundColor: '#4CAF50',
+  },
+  stopButton: {
+    backgroundColor: '#F44336',
+    flex: 0.3,
+  },
+  voiceButton: {
+    backgroundColor: '#9C27B0',
+  },
+  buttonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  obstacleVisualizer: {
+    height: 200,
+    backgroundColor: '#2D2D2D',
+    borderRadius: 8,
+    marginBottom: 12,
+    position: 'relative',
+  },
+  userPosition: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    width: 20,
+    height: 20,
+    backgroundColor: '#00BCD4',
+    borderRadius: 10,
+    transform: [{ translateX: -10 }, { translateY: -10 }],
+    borderWidth: 3,
+    borderColor: 'rgba(0, 188, 212, 0.3)',
+  },
+  obstacleDot: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    transform: [{ translateX: -8 }, { translateY: -8 }],
+  },
+  obstacleCount: {
+    fontSize: 14,
+    color: '#B0B0B0',
+    textAlign: 'center',
+  },
+  commandList: {
+    marginTop: 12,
+    backgroundColor: '#2D2D2D',
+    borderRadius: 8,
+    padding: 12,
+  },
+  commandHint: {
+    fontSize: 14,
+    color: '#B0B0B0',
+    marginBottom: 8,
+  },
+  commandItem: {
+    fontSize: 14,
+    color: 'white',
+    marginBottom: 4,
+  },
+  footer: {
+    backgroundColor: '#1E1E1E',
+    padding: 16,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  footerText: {
+    fontSize: 12,
+    color: '#B0B0B0',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  footerLinks: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 20,
+  },
+  footerLink: {
+    fontSize: 14,
+    color: '#2196F3',
+  },
+});
