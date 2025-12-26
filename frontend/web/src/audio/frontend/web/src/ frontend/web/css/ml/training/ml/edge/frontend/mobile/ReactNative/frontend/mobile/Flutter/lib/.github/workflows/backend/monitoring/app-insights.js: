@@ -1,0 +1,120 @@
+const appInsights = require('applicationinsights');
+const { v4: uuidv4 } = require('uuid');
+
+class MonitoringService {
+    constructor() {
+        appInsights.setup(process.env.APPLICATIONINSIGHTS_CONNECTION_STRING)
+            .setAutoDependencyCorrelation(true)
+            .setAutoCollectRequests(true)
+            .setAutoCollectPerformance(true)
+            .setAutoCollectExceptions(true)
+            .setAutoCollectDependencies(true)
+            .setAutoCollectConsole(true)
+            .setUseDiskRetryCaching(true)
+            .setSendLiveMetrics(true)
+            .start();
+        
+        this.client = appInsights.defaultClient;
+        this.context = appInsights.getCorrelationContext();
+    }
+    
+    trackEchoProcessing(sessionId, processingTime, obstacleCount) {
+        this.client.trackMetric({
+            name: 'EchoProcessingTime',
+            value: processingTime,
+            properties: {
+                sessionId,
+                obstacleCount,
+                environment: process.env.NODE_ENV
+            }
+        });
+        
+        this.client.trackEvent({
+            name: 'EchoProcessed',
+            properties: {
+                sessionId,
+                processingTime,
+                obstacleCount,
+                timestamp: new Date().toISOString()
+            }
+        });
+    }
+    
+    trackObstacleDetection(obstacle, confidence, inferenceType) {
+        this.client.trackEvent({
+            name: 'ObstacleDetected',
+            properties: {
+                obstacleId: obstacle.id,
+                type: obstacle.type,
+                distance: obstacle.distance,
+                angle: obstacle.angle,
+                confidence,
+                inferenceType,
+                timestamp: new Date().toISOString()
+            }
+        });
+    }
+    
+    trackVoiceCommand(command, success, responseTime) {
+        this.client.trackEvent({
+            name: 'VoiceCommand',
+            properties: {
+                command,
+                success,
+                responseTime,
+                userId: this.getUserId(),
+                timestamp: new Date().toISOString()
+            }
+        });
+    }
+    
+    trackUserNavigation(sessionId, duration, distanceCovered) {
+        this.client.trackEvent({
+            name: 'NavigationSession',
+            properties: {
+                sessionId,
+                duration,
+                distanceCovered,
+                obstacleCount: this.getObstacleCount(sessionId),
+                userId: this.getUserId(),
+                timestamp: new Date().toISOString()
+            }
+        });
+    }
+    
+    trackError(error, context) {
+        this.client.trackException({
+            exception: new Error(error.message),
+            properties: {
+                ...context,
+                stack: error.stack,
+                timestamp: new Date().toISOString()
+            }
+        });
+    }
+    
+    trackPerformance(metricName, value, dimensions) {
+        this.client.trackMetric({
+            name: metricName,
+            value,
+            properties: dimensions
+        });
+    }
+    
+    getUserId() {
+        // Get or create user ID
+        let userId = localStorage.getItem('visionecho_userId');
+        if (!userId) {
+            userId = uuidv4();
+            localStorage.setItem('visionecho_userId', userId);
+        }
+        return userId;
+    }
+    
+    getObstacleCount(sessionId) {
+        // Get obstacle count from session
+        return 0; // Implement based on your data
+    }
+}
+
+module.exports = new MonitoringService();
