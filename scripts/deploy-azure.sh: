@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Azure Resource Deployment for Vision-Echo
+echo "🚀 Deploying Vision-Echo Azure Infrastructure..."
+
+# Variables
+RESOURCE_GROUP="visionecho-rg"
+LOCATION="eastus"
+STORAGE_ACCOUNT="visionechostorage"
+FUNCTION_APP="visionecho-functions"
+COSMOS_DB="visionecho-cosmos"
+ML_WORKSPACE="visionecho-ml"
+IOT_HUB="visionecho-iothub"
+KEY_VAULT="visionecho-vault"
+
+# Create Resource Group
+az group create --name $RESOURCE_GROUP --location $LOCATION
+
+# Create Storage Account
+az storage account create \
+  --name $STORAGE_ACCOUNT \
+  --resource-group $RESOURCE_GROUP \
+  --location $LOCATION \
+  --sku Standard_LRS \
+  --kind StorageV2
+
+# Create Azure Functions
+az functionapp create \
+  --resource-group $RESOURCE_GROUP \
+  --consumption-plan-location $LOCATION \
+  --runtime node \
+  --runtime-version 18 \
+  --functions-version 4 \
+  --name $FUNCTION_APP \
+  --storage-account $STORAGE_ACCOUNT \
+  --os-type Linux
+
+# Create Azure ML Workspace
+az ml workspace create \
+  --workspace-name $ML_WORKSPACE \
+  --resource-group $RESOURCE_GROUP \
+  --location $LOCATION
+
+# Create IoT Hub for Edge Devices
+az iot hub create \
+  --name $IOT_HUB \
+  --resource-group $RESOURCE_GROUP \
+  --sku S1
+
+# Create Key Vault for Secrets
+az keyvault create \
+  --name $KEY_VAULT \
+  --resource-group $RESOURCE_GROUP \
+  --location $LOCATION
+
+echo "✅ Azure infrastructure deployed successfully!"
