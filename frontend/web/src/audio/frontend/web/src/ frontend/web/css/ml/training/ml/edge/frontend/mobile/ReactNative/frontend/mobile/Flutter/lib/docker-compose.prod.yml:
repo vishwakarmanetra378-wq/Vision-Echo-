@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # Azure Functions Emulator for local testing
+  azure-functions:
+    build:
+      context: ./backend/functions
+      dockerfile: Dockerfile
+    ports:
+      - "7071:80"
+    environment:
+      - AzureWebJobsStorage=UseDevelopmentStorage=true
+      - FUNCTIONS_WORKER_RUNTIME=node
+      - AzureWebJobsSecretStorageType=files
+      - NODE_ENV=production
+    volumes:
+      - ./backend/functions:/app
+      - ./data:/data
+    networks:
+      - visionecho-network
+
+  # Frontend Web App
+  web-app:
+    build:
+      context: ./frontend/web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    environment:
+      - NODE_ENV=production
+      - REACT_APP_API_URL=http://localhost:7071
+    depends_on:
+      - azure-functions
+    networks:
+      - visionecho-network
+
+  # ML Inference Service
+  ml-inference:
+    build:
+      context: ./ml
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - AZURE_ML_ENDPOINT=${AZURE_ML_ENDPOINT}
+      - AZURE_ML_KEY=${AZURE_ML_KEY}
+      - MODEL_PATH=/app/models/echo_model.onnx
+    volumes:
+      - ./ml/models:/app/models
+    deploy:
+      resources:
+        reservations:
+          memory: 2G
+    networks:
+      - visionecho-network
+
+networks:
+  visionecho-network:
+    driver: bridge
+
+volumes:
+  azure-storage-data:
+  postgres-data:
